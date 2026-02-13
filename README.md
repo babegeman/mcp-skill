@@ -114,4 +114,6 @@ Per-server detail cards including:
 
 ## License
 
-MIT
+MIT License - see [LICENSE](LICENSE) for details.
+
+Feel free to use, modify, and distribute this skill. Contributions welcome!
