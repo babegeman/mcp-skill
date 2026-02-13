@@ -18,11 +18,19 @@ PROJECT_DIR="$(pwd)"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --section)
-      SECTION="${2:-all}"
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo '{"error":"--section requires a value (all, configs, servers, health, settings)"}' >&2
+        exit 1
+      fi
+      SECTION="$2"
       shift 2
       ;;
     --project-dir)
-      PROJECT_DIR="${2:-$(pwd)}"
+      if [[ $# -lt 2 || "$2" == -* ]]; then
+        echo '{"error":"--project-dir requires a path value"}' >&2
+        exit 1
+      fi
+      PROJECT_DIR="$2"
       shift 2
       ;;
     -*)
@@ -289,7 +297,7 @@ classify_server() {
       # Check for ${VAR} references in env values (POSIX-compatible, no grep -P)
       local env_var_refs
       env_var_refs="$(echo "$env_json" | jq -r 'to_entries[] | select(.value | test("\\$\\{")) | .value' 2>/dev/null | \
-        grep -o '\${[^}]*}' 2>/dev/null | sort -u | while read -r ref; do
+        grep -o '\${[^}][^}]*}' 2>/dev/null | sort -u | while read -r ref; do
           varname="${ref#\$\{}"
           varname="${varname%\}}"
           varname="${varname%%:-*}"
