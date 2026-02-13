@@ -288,14 +288,16 @@ classify_server() {
       url="$(echo "$server_json" | jq -r '.url // "not set"')"
       headers_json="$(echo "$server_json" | jq '.headers // {}')"
 
-      # Redact headers
+      # Redact headers for display
       local redacted_headers
       redacted_headers="$(redact_json_object "$headers_json")"
 
+      # Store both original (for health check) and redacted (for display)
       result="$(echo "$result" | jq \
         --arg url "$url" \
         --argjson headers "$redacted_headers" \
-        '. + { url: $url, headers: $headers }'
+        --argjson original_headers "$headers_json" \
+        '. + { url: $url, headers: $headers, original_headers: $original_headers }'
       )"
       ;;
   esac
@@ -422,43 +424,108 @@ health_check_server() {
       if [[ "$url" == "not set" || -z "$url" ]]; then
         add_issue "error" "No URL configured"
       else
-        # Basic URL reachability check (HEAD request, 5s timeout)
-        local http_code
-        http_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -X HEAD "$url" 2>/dev/null)" || http_code="000"
+        # Validate URL format
+        if [[ ! "$url" =~ ^https?:// ]]; then
+          add_issue "error" "Invalid URL format (must start with http:// or https://)"
+        fi
 
-        server_json="$(echo "$server_json" | jq --arg hc "$http_code" '. + { http_status: $hc }')"
-
-        case "$http_code" in
-          000)
-            add_issue "warning" "Could not reach $url (timeout or DNS failure)"
-            ;;
-          401|403)
-            add_issue "info" "Server returned $http_code — authentication required (expected if OAuth/API key needed)"
-            ;;
-          404)
-            add_issue "warning" "Server returned 404 — URL may be incorrect"
-            ;;
-          405)
-            # Method not allowed for HEAD is fine — server is reachable
-            ;;
-          2*|3*)
-            ;; # healthy
-          5*)
-            add_issue "warning" "Server returned $http_code — server-side error"
-            ;;
-        esac
-
-        # Check for OAuth indicators
+        # Check for authentication configuration
         local has_headers
         has_headers="$(echo "$server_json" | jq '.headers | length > 0')"
         if [[ "$has_headers" == "true" ]]; then
           server_json="$(echo "$server_json" | jq '. + { auth_configured: true }')"
         else
           server_json="$(echo "$server_json" | jq '. + { auth_configured: false }')"
-          if [[ "$http_code" == "401" || "$http_code" == "403" ]]; then
-            add_issue "warning" "Server requires auth but no headers configured — may need OAuth setup"
+        fi
+
+        # MCP protocol health check - send proper initialize message
+        local mcp_initialize_payload
+        mcp_initialize_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mcp-diagnostic","version":"1.0.0"}}}'
+
+        # Use original_headers (not redacted) for actual health check
+        local headers_json
+        headers_json="$(echo "$server_json" | jq -r '.original_headers // .headers // {}')"
+
+        # Build curl command with headers from config
+        local curl_cmd="curl -sS -o /dev/null -w '%{http_code}' --max-time 10"
+        curl_cmd="$curl_cmd -H 'Content-Type: application/json'"
+
+        # Add configured headers
+        if [[ "$(echo "$headers_json" | jq 'length')" -gt 0 ]]; then
+          while IFS=$'\t' read -r key val; do
+            curl_cmd="$curl_cmd -H '$key: $val'"
+          done < <(echo "$headers_json" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
+        fi
+
+        curl_cmd="$curl_cmd -X POST -d '$mcp_initialize_payload' '$url'"
+
+        # Execute the MCP initialize request
+        local http_code response_body
+        http_code="$(eval "$curl_cmd" 2>/dev/null)" || http_code="000"
+
+        # Also capture response body to validate it's MCP JSON-RPC
+        response_body="$(eval "curl -sS --max-time 10 -H 'Content-Type: application/json' $(echo "$headers_json" | jq -r 'to_entries[] | "-H \"\(.key): \(.value)\""' 2>/dev/null) -X POST -d '$mcp_initialize_payload' '$url' 2>/dev/null")" || response_body=""
+
+        server_json="$(echo "$server_json" | jq --arg hc "$http_code" '. + { http_status: $hc }')"
+
+        # Validate MCP response
+        local is_valid_mcp=false
+        if [[ -n "$response_body" ]]; then
+          # Check if response is valid JSON-RPC 2.0 with result or error
+          if echo "$response_body" | jq -e 'has("jsonrpc") and has("id") and (has("result") or has("error"))' &>/dev/null; then
+            is_valid_mcp=true
+            server_json="$(echo "$server_json" | jq '. + { mcp_response: "valid" }')"
+          else
+            server_json="$(echo "$server_json" | jq '. + { mcp_response: "invalid" }')"
           fi
         fi
+
+        # Detect known OAuth servers
+        local is_oauth_server=false
+        case "$url" in
+          *mcp.atlassian.com*)
+            is_oauth_server=true
+            ;;
+        esac
+
+        case "$http_code" in
+          000)
+            add_issue "error" "Could not reach $url (timeout or DNS failure)"
+            ;;
+          200)
+            if [[ "$is_valid_mcp" == true ]]; then
+              # Valid MCP response
+              :
+            else
+              add_issue "warning" "Server returned HTTP 200 but not a valid MCP JSON-RPC response"
+            fi
+            ;;
+          401|403)
+            if [[ "$has_headers" == "false" ]]; then
+              if [[ "$is_oauth_server" == true ]]; then
+                # OAuth server - 401 without headers is expected (credentials managed by Claude CLI)
+                server_json="$(echo "$server_json" | jq '. + { oauth_managed: true }')"
+                # Don't add an issue - this is normal for OAuth servers
+              else
+                add_issue "error" "Server returned $http_code — authentication required but no headers configured"
+              fi
+            else
+              add_issue "warning" "Server returned $http_code — authentication may be invalid or expired"
+            fi
+            ;;
+          404)
+            add_issue "error" "Server returned 404 — URL may be incorrect"
+            ;;
+          405)
+            add_issue "warning" "Server returned 405 — endpoint may not support MCP protocol"
+            ;;
+          5*)
+            add_issue "error" "Server returned $http_code — server-side error"
+            ;;
+          *)
+            add_issue "warning" "Server returned unexpected HTTP status: $http_code"
+            ;;
+        esac
       fi
       ;;
 
@@ -583,6 +650,8 @@ main() {
 
     local health_result
     health_result="$(health_check_server "$srv")"
+    # Remove original_headers from output (they're only for health checking, not display)
+    health_result="$(echo "$health_result" | jq 'del(.original_headers)')"
     health_results="$(echo "$health_results" | jq --argjson h "$health_result" '. + [$h]')"
     effective_servers="$(echo "$effective_servers" | jq --argjson s "$health_result" '. + [$s]')"
   done < <(echo "$all_servers" | jq -c '.[]')

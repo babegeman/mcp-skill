@@ -9,7 +9,6 @@ description: >
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Bash, Read, Glob, Grep
-argument-hint: "[--full | --servers | --settings | --prompt-preview]"
 ---
 
 # MCP Diagnostic Skill
@@ -119,7 +118,10 @@ Using `effective_servers` and their `health` and `issues` fields, produce:
    - Docker not running → suggest `docker desktop` or `systemctl start docker`
    - npx package not found → suggest `npm install -g <package>`
    - URL unreachable → suggest checking network, VPN, or URL typos
-   - Auth required but no headers → suggest OAuth setup or API key configuration
+   - **Authentication issues (401/403 errors)** → provide specific instructions:
+     - **For OAuth-based servers**: The script detects known OAuth servers (Atlassian) and marks them with `oauth_managed: true`. These servers may show `http_status: 401` but will be marked as healthy if they're OAuth-managed, since credentials are stored by the Claude CLI outside config files.
+     - **For token-based servers (GitHub PAT, API keys)**: If 401/403 with headers configured, suggest regenerating the token and updating the config file manually
+     - Note that OAuth credentials are managed by the Claude CLI and stored securely outside config files
 
 3. Include the `environment.runtimes` data as a runtime availability reference table.
 

@@ -19,11 +19,19 @@ cp -r .claude/skills/mcp-diagnostic ~/.claude/skills/
 Inside a Claude Code session:
 
 ```
-/mcp-diagnostic                  # Full diagnostic report
+/mcp-diagnostic                   # Full diagnostic report
 /mcp-diagnostic --servers         # Server inventory and health only
 /mcp-diagnostic --settings        # Settings and permissions audit only
 /mcp-diagnostic --prompt-preview  # MCP system prompt preview only
 ```
+
+### Fixing Authentication Issues
+
+When the diagnostic detects authentication problems (401/403 errors):
+
+- **OAuth-based servers (Atlassian)**: Run `claude mcp` in your terminal to re-authenticate
+- **Token-based servers (GitHub)**: Regenerate your token and update the config file manually
+- OAuth credentials are managed securely by the Claude CLI, not stored in config files
 
 ## Architecture
 
@@ -77,10 +85,12 @@ Per-server detail cards including:
 - Tier inheritance and conflict detection
 
 ### Connection Health
-- Binary existence and executability checks
+- Binary existence and executability checks for stdio servers
 - Runtime version detection (Node.js, Python, uv, Docker)
-- HTTP reachability for remote servers
-- Auth configuration validation
+- **MCP protocol handshake testing** for HTTP/SSE servers (sends proper `initialize` JSON-RPC message)
+- HTTP status code validation and MCP response verification
+- **OAuth server detection** - Automatically detects OAuth-based servers (like Atlassian) and marks them as healthy even with 401 status, since OAuth credentials are managed by Claude CLI
+- Authentication header validation
 - Specific troubleshooting steps for each issue found
 
 ### Settings & Permissions Audit
