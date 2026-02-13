@@ -4,329 +4,234 @@ description: >
   Use this skill when the user asks to debug, inspect, diagnose, or review their MCP (Model Context Protocol)
   server configuration. Provides a comprehensive diagnostic report covering all configuration tiers
   (managed, user, project, local), server metadata (transport type, command, URL, environment),
-  connection health, available tools/resources/prompts, and a preview of the system prompt content
-  that each MCP server contributes. Invoke via /mcp-diagnostic.
+  connection health, and a preview of the system prompt content that each MCP server contributes.
+  Invoke via /mcp-diagnostic.
 disable-model-invocation: true
 user-invocable: true
-allowed-tools: Bash, Read, Glob, Grep, Task, WebFetch
+allowed-tools: Bash, Read, Glob, Grep
 argument-hint: "[--full | --servers | --settings | --prompt-preview]"
 ---
 
 # MCP Diagnostic Skill
 
-You are an MCP diagnostic agent. When invoked, you MUST produce a comprehensive, plaintext diagnostic
-report of every MCP server configured in the user's environment. Follow every step below carefully.
-Present all output in well-structured markdown with clear section headers.
+You are an MCP diagnostic agent. Your job is to run the diagnostic collector script, interpret
+its structured JSON output, and present a comprehensive, well-formatted diagnostic report to
+the user.
 
-## Arguments
+## Step 1: Run the Diagnostic Collector
 
-- If `$ARGUMENTS` is empty or `--full`, run ALL sections below.
-- If `$ARGUMENTS` is `--servers`, run only Sections 1-4.
-- If `$ARGUMENTS` is `--settings`, run only Sections 5-6.
-- If `$ARGUMENTS` is `--prompt-preview`, run only Section 7.
+First, locate and execute the diagnostic script. It handles ALL mechanical work: config file
+discovery, JSON parsing, server classification, secret redaction, health checks, and settings
+auditing.
+
+```bash
+bash "$(find ~/.claude/skills/mcp-diagnostic/scripts .claude/skills/mcp-diagnostic/scripts -name 'mcp-diagnose.sh' 2>/dev/null | head -1)"
+```
+
+If the script is not found at either path, tell the user:
+> The diagnostic script was not found. Make sure the skill is installed at
+> `~/.claude/skills/mcp-diagnostic/` or `<project>/.claude/skills/mcp-diagnostic/`.
+
+The script outputs a single JSON object. Capture the entire output.
+
+## Step 2: Determine Scope from Arguments
+
+- `$ARGUMENTS` is empty or `--full` → produce the FULL report (all sections)
+- `$ARGUMENTS` is `--servers` → Sections 1-3 only (config tiers, server metadata, health)
+- `$ARGUMENTS` is `--settings` → Section 4 only (settings & permissions)
+- `$ARGUMENTS` is `--prompt-preview` → Section 5 only (system prompt preview)
+
+## Step 3: Interpret the JSON and Produce the Report
+
+Use the JSON output to produce the following sections. Do NOT re-read config files or re-run
+checks — everything you need is in the JSON. Your value-add is formatting, analysis,
+recommendations, and the system prompt preview (which requires your knowledge of MCP servers).
 
 ---
 
-## Section 1: Configuration Tier Discovery
+### Section 1: Configuration Tier Discovery
 
-Identify and read every configuration source that can define MCP servers. Report which files
-exist, which are missing, and which contain MCP server definitions. Present this as a table.
-
-### Files to check (in precedence order, highest first):
-
-| Tier | Scope | Path | Shared? |
-|------|-------|------|---------|
-| **Managed MCP** | Organization-wide (IT-deployed) | Linux: `/etc/claude-code/managed-mcp.json` | Yes |
-| | | macOS: `/Library/Application Support/ClaudeCode/managed-mcp.json` | |
-| | | Windows: `C:\Program Files\ClaudeCode\managed-mcp.json` | |
-| **Managed Settings** | Organization-wide policies | Linux: `/etc/claude-code/managed-settings.json` | Yes |
-| | | macOS: `/Library/Application Support/ClaudeCode/managed-settings.json` | |
-| **User** | Personal (all projects) | `~/.claude.json` → `mcpServers` key | No |
-| **Project** | Team-shared (git-tracked) | `<project-root>/.mcp.json` | Yes (via git) |
-| **Local Settings** | Personal per-project | `<project-root>/.claude/settings.local.json` | No (gitignored) |
-| **Project Settings** | Team project settings | `<project-root>/.claude/settings.json` | Yes (via git) |
-| **User Settings** | Personal global settings | `~/.claude/settings.json` | No |
-
-### Steps:
-
-1. Determine the current working directory and project root (look for `.git` directory walking upward).
-2. Detect the OS platform to know which managed paths to check.
-3. For each file path above, check if the file exists.
-4. If it exists, read it and extract any `mcpServers` configuration block.
-5. Report the results in a table:
+Using `config_files` from the JSON, produce this table:
 
 ```
-| Tier | File Path | Exists? | # Servers Defined | Server Names |
-|------|-----------|---------|-------------------|--------------|
+| Tier | File Path | Exists? | Shared? | # Servers | Server Names |
+|------|-----------|---------|---------|-----------|--------------|
 ```
 
-6. If no MCP servers are found anywhere, state that clearly and suggest how to add one
-   (`claude mcp add` command examples).
+Include ALL tiers, even those that don't exist (show "No" in Exists column).
+After the table:
+- If zero servers found anywhere, explain how to add one with `claude mcp add` examples
+- Note which config files are git-trackable (shared) vs personal
 
 ---
 
-## Section 2: Server Inventory & Metadata
+### Section 2: Server Inventory & Metadata
 
-For every MCP server discovered across all tiers, produce a detailed metadata card.
+Using `effective_servers` (winners after tier merging) and `all_servers_all_tiers` (every
+definition including shadowed ones), produce a detailed card for each server:
 
-### For each server, report:
-
-```
+```markdown
 ### Server: <name>
-- **Defined in**: <tier name> (<file path>)
-- **Transport**: stdio | http | sse
-- **Status**: (will be filled in Section 4)
+- **Defined in**: <tier> (`<source_file>`)
+- **Transport**: stdio / http / sse
+- **Health**: <healthy/warning/error> <emoji if appropriate>
 
-#### Connection Details:
-  - For stdio servers:
-    - **Command**: <command>
-    - **Args**: <args list>
-    - **Package handler**: <npx | uvx | docker | bunx | node | python | custom binary>
-    - **Package**: <package name if detectable from args>
-    - **Working directory**: <cwd if specified>
-  - For http/sse servers:
-    - **URL**: <url>
-    - **Headers**: <list any configured headers, REDACT bearer tokens / API keys showing only first 4 and last 4 chars>
+#### Connection Details
+For stdio:
+- **Command**: `<command>`
+- **Args**: `<args>`
+- **Full command**: `<resolved_command>`
+- **Package handler**: <npx/uvx/docker/bunx/node/python/deno/custom>
+- **Package**: <detected package name>
+- **Working directory**: <cwd or "default">
+- **Runtime versions**: <node/python/etc version if detected>
 
-#### Environment Variables:
-  - List all env vars configured for this server
-  - REDACT sensitive values (API keys, tokens, passwords) — show only first 4 and last 4 characters
-  - Flag any env vars that reference ${VAR} substitution and whether the var is currently set in the shell
+For http/sse:
+- **URL**: `<url>`
+- **HTTP status**: <status code from health check>
+- **Auth configured**: yes/no
+- **Headers**: <redacted header list>
 
-#### Inheritance & Override Info:
-  - Note if this server name appears in multiple tiers
-  - Indicate which tier takes precedence (wins)
-  - Flag any conflicts or shadowed definitions
+#### Environment Variables
+<table of env vars — already redacted by the script>
+<flag any ${VAR} references and whether they resolve, using env_var_refs>
+
+#### Tier Inheritance
+<if this server appears in conflicts[], explain which tiers define it and which wins>
 ```
 
 ---
 
-## Section 3: Settings & Permissions Audit
+### Section 3: Connection Health
 
-Report all settings that affect MCP behavior, across all settings tiers.
+Using `effective_servers` and their `health` and `issues` fields, produce:
 
-### Steps:
-
-1. Read each settings file that exists:
-   - `~/.claude/settings.json` (user)
-   - `<project-root>/.claude/settings.json` (project)
-   - `<project-root>/.claude/settings.local.json` (local)
-   - Managed settings path for current OS
-
-2. Extract and report:
-   - **Permission rules** that reference MCP-related tools (any `mcp_*` patterns, or MCP server tool names)
-   - **Allowed/denied MCP servers** (from managed settings `allowedMcpServers` / `deniedMcpServers`)
-   - **Environment variables** set via settings `env` blocks that might affect MCP servers
-   - **Hooks** that reference MCP or could affect MCP behavior
-
-3. Present as:
+1. A summary health table:
 
 ```
-### Settings Tier: <tier name> (<file path>)
+| Server | Transport | Health | Issues |
+|--------|-----------|--------|--------|
+```
 
-**Permissions affecting MCP:**
-- allow: [list]
-- deny: [list]
+2. For each server with issues, provide **specific troubleshooting steps**. Use your knowledge
+   of common MCP problems:
+   - Missing binary → suggest install command
+   - Docker not running → suggest `docker desktop` or `systemctl start docker`
+   - npx package not found → suggest `npm install -g <package>`
+   - URL unreachable → suggest checking network, VPN, or URL typos
+   - Auth required but no headers → suggest OAuth setup or API key configuration
 
-**MCP Allowlist/Denylist:**
-- Allowed: [list or "not configured"]
-- Denied: [list or "not configured"]
+3. Include the `environment.runtimes` data as a runtime availability reference table.
 
-**Environment from settings:**
-- KEY=VALUE (redacted if sensitive)
+4. Include the `cli_mcp_list` output if it returned useful data (not a timeout message).
 
-**Relevant Hooks:**
-- <event>: <hook description>
+---
+
+### Section 4: Settings & Permissions Audit
+
+Using `settings_audit` from the JSON, produce a per-tier breakdown:
+
+```markdown
+### Settings: <tier> (`<path>`)
+
+**Permissions:**
+- Allow: <list or "none configured">
+- Deny: <list or "none configured">
+- MCP-specific rules: <any rules matching mcp/MCP patterns, or "none">
+
+**MCP Server Policies:**
+- Allowlist: <allowedMcpServers or "not configured">
+- Denylist: <deniedMcpServers or "not configured">
+
+**Environment Variables:**
+<from settings env block, or "none">
+
+**Hooks:**
+<list each hook event and what it does, or "none configured">
+<flag any hooks that could affect MCP behavior>
+```
+
+After all tiers, provide a **merged effective permissions** summary showing what the combined
+effect of all tiers is.
+
+---
+
+### Section 5: System Prompt Preview
+
+This is WHERE YOU ADD THE MOST VALUE. The script cannot do this part — it requires your
+knowledge of MCP server packages and the Claude Code system prompt format.
+
+For each server in `effective_servers`:
+
+1. **Identify the MCP package** from the `package`, `command`, `args`, or `url` fields.
+
+2. **If you recognize the package** (e.g., `@modelcontextprotocol/server-filesystem`,
+   `@anthropic/mcp-server-github`, `mcp-server-sqlite`, Notion MCP, Slack MCP, etc.):
+   - List the tools it provides with their names, descriptions, and parameter schemas
+   - Format them as they would appear in the Claude system prompt:
+   ```
+   Tool: mcp__<server-name>__<tool-name>
+   Description: <what it does>
+   Parameters:
+     - <param>: <type> (<required/optional>) — <description>
+   ```
+   - List any resources and prompts it exposes
+
+3. **If you don't recognize the package**:
+   - State that tool enumeration requires an active connection
+   - Suggest the user run `/mcp` in an active Claude Code session to see live tools
+   - If the package name gives clues (e.g., "database", "filesystem"), speculate on likely tools
+
+4. **Estimate token impact**:
+   - Each tool definition is roughly 100-300 tokens in the system prompt
+   - Multiply by number of tools per server
+   - Sum across all servers for total estimated MCP prompt overhead
+
+End with:
+```
+### System Prompt Impact Summary
+| Server | Est. Tools | Est. Tokens |
+|--------|-----------|-------------|
+| Total  | N         | ~N tokens   |
 ```
 
 ---
 
-## Section 4: Connection Health Check
+### Section 6: Final Summary & Recommendations
 
-Run the built-in MCP status check and augment it with additional diagnostics.
-
-### Steps:
-
-1. Run `claude mcp list` to get the current MCP server list from the CLI's perspective.
-2. For each **stdio** server:
-   - Check if the command binary exists and is executable (`which <command>` or `command -v`).
-   - If it uses `npx`, check if the package is installed or will be fetched (`npx --yes` behavior).
-   - If it uses `uvx`, check if `uvx` is available.
-   - If it uses `docker`, check if docker is running and the image exists locally.
-   - If it uses `node` or `python`, check the runtime version.
-   - Report the full resolved command that would be executed.
-3. For each **http/sse** server:
-   - Attempt a basic connectivity check if possible (report URL reachability).
-   - Note if OAuth or API key authentication is required.
-4. Report a per-server health summary:
-
-```
-| Server | Transport | Binary/URL OK? | Auth Configured? | Overall Health |
-|--------|-----------|----------------|------------------|----------------|
-| name   | stdio     | Yes/No         | N/A              | Healthy / Warning / Error |
-```
-
-5. For any unhealthy servers, provide specific troubleshooting steps.
-
----
-
-## Section 5: Tool, Resource & Prompt Enumeration
-
-For each connected and healthy MCP server, enumerate all capabilities it exposes.
-
-### Steps:
-
-1. Run `claude mcp list-tools` (if available) or note that tool enumeration requires an active session.
-2. For each server, list:
-
-```
-### Server: <name>
-
-**Tools (<count>):**
-| Tool Name | Description (first 80 chars) |
-|-----------|------------------------------|
-
-**Resources (<count>):**
-| Resource URI | Name | Description |
-|-------------|------|-------------|
-
-**Prompts (<count>):**
-| Prompt Name | Description | Arguments |
-|-------------|-------------|-----------|
-```
-
-3. If tool enumeration is not possible outside an active MCP connection, explain this and
-   suggest the user run `/mcp` within an active Claude Code session instead.
-
----
-
-## Section 6: Configuration Source Map
-
-Produce a consolidated view showing exactly where every piece of MCP-related configuration
-originates and how the tiers merge.
-
-### Output format:
-
-```
-## Configuration Source Map
-
-### Effective MCP Server List (after tier merging):
-
-| # | Server Name | Winning Tier | Defined In | Shadowed By |
-|---|-------------|-------------|------------|-------------|
-| 1 | github      | Project     | .mcp.json  | —           |
-| 2 | database    | User        | ~/.claude.json | —       |
-
-### Tier Merge Details:
-- Managed tier defines: [list or none]
-- User tier defines: [list or none]
-- Project tier defines: [list or none]
-- Local tier defines: [list or none]
-
-### Conflicts Detected:
-- <server name> defined in both <tier A> and <tier B>; <tier> wins because <reason>
-  (or "No conflicts detected")
-```
-
----
-
-## Section 7: System Prompt Preview
-
-Generate a preview of what the MCP-contributed system prompt content would look like for the
-current configuration. This is the content that gets injected into Claude's context when MCP
-servers are connected.
-
-### Steps:
-
-1. For each configured server, construct a preview block showing:
-
-```
-## MCP System Prompt Preview
-
-> Note: This is an approximation of what Claude Code injects into the system prompt
-> for each connected MCP server. The actual prompt is generated at runtime when
-> servers connect and may vary slightly.
-
----
-
-### Server: <name> (<transport>)
-
-#### Tools contributed to system prompt:
-
-For each tool, the system prompt would include something like:
-
-\`\`\`
-<tool>
-  <name>mcp__<server-name>__<tool-name></name>
-  <description><tool description></description>
-  <parameters>
-    <parameter name="param1" type="string" required="true">
-      Description of param1
-    </parameter>
-    ...
-  </parameters>
-</tool>
-\`\`\`
-
-#### Resources contributed:
-(list resource definitions that would be available)
-
-#### Prompts contributed:
-(list prompt templates that would be available)
-
----
-```
-
-2. If tool details are not available (servers not currently connected), construct the preview
-   based on the server's known package/type and document what WOULD appear. For well-known
-   MCP servers (filesystem, GitHub, Slack, Notion, etc.), provide example tool listings based
-   on common knowledge of those packages.
-
-3. Show an estimated token count for the MCP system prompt contribution if possible.
-
-4. End with a summary:
-
-```
-### MCP System Prompt Summary
-- Total servers: <N>
-- Estimated tools: <N> (from connected servers) + <N> (from unconnected servers, unknown)
-- Estimated system prompt addition: ~<N> tokens (approximate)
-```
-
----
-
-## Final Summary
-
-End the diagnostic report with:
+Produce a summary dashboard using `summary` from the JSON:
 
 ```
 ## MCP Diagnostic Summary
 
-| Metric | Value |
-|--------|-------|
-| Config files found | X of Y checked |
-| Total servers defined | N |
-| Healthy servers | N |
-| Warning servers | N |
-| Unhealthy servers | N |
-| Total tools available | N (or "requires active connection") |
-| Configuration conflicts | N |
-| Settings tiers active | list |
-
-### Recommendations:
-1. (Any actionable recommendations based on findings)
-2. (Suggestions for fixing unhealthy servers)
-3. (Notes about missing configurations or best practices)
+| Metric                | Value |
+|-----------------------|-------|
+| Config files found    | X of Y checked |
+| Total servers         | N |
+| Healthy               | N |
+| Warnings              | N |
+| Errors                | N |
+| Conflicts             | N |
+| Active settings tiers | <list> |
+| Platform              | <platform> |
+| Project root          | <path> |
 ```
+
+Then provide **actionable recommendations** based on everything you found:
+- Fix unhealthy servers (specific steps)
+- Resolve conflicts between tiers
+- Security suggestions (e.g., move secrets to env vars, use `.local.json` for personal config)
+- Performance suggestions (e.g., too many MCP servers inflating system prompt)
+- Missing best practices (e.g., no `.mcp.json` for team-shared servers)
 
 ---
 
-## Important Notes
+## Important Rules
 
-- **REDACT SECRETS**: Always redact API keys, tokens, passwords, and other sensitive values.
-  Show only the first 4 and last 4 characters with asterisks in between (e.g., `sk-1****xyz9`).
-  If a value is 8 characters or fewer, show only `****REDACTED****`.
-- **Be thorough**: Check every file path. Don't skip a tier just because it's unlikely to exist.
-- **Be precise**: Report exact file paths, exact server names, exact commands.
-- **Be helpful**: When something is wrong, don't just report it — suggest how to fix it.
-- **Format clearly**: Use tables, code blocks, and headers for scannable output.
+1. **NEVER re-read config files manually** — the script already did this. Use its JSON output.
+2. **NEVER run `claude mcp list` yourself** — the script already tried and included the result.
+3. **Secrets are pre-redacted** — the script handles this. Don't try to re-redact.
+4. **Be specific** — exact paths, exact commands, exact server names.
+5. **Be helpful** — don't just report problems, suggest fixes with copy-pasteable commands.
+6. **Format for scanning** — use tables, headers, code blocks, and visual hierarchy.
+7. **Acknowledge limitations** — if you can't enumerate tools (no active connection), say so clearly.
